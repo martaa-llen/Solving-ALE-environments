@@ -1,0 +1,8 @@
+numpy
+torch
+wandb
+ale-py
+gymnasium==1.0.0
+stable-baselines3[extra]
+Pillow
+matplotlib
