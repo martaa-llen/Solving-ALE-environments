@@ -21,9 +21,7 @@ from collections import deque
 wandb.login(key="KEY") # Replace with your key
 gym.register_envs(ale_py)
 
-# Create videos directory
-if not os.path.exists("videos_RL"):
-    os.makedirs("videos_RL")
+
 
 # Initialize environment
 env = gym.make("ALE/Boxing-v5", render_mode="rgb_array")
@@ -288,7 +286,7 @@ if __name__ == "__main__":
     best_mean_reward = float('-inf')
 
     # After environment imports, add directories
-    for directory in ["boxing_models_ev", "boxing_vids_ev"]:
+    for directory in ["boxing_models_reinforce", "boxing_videos_reinforce"]:
         if not os.path.exists(directory):
             os.makedirs(directory)
 
@@ -306,7 +304,7 @@ if __name__ == "__main__":
 
     for episode in range(NUM_EPISODES):
         # Create environment with potential recording
-        env = make_env("boxing_vids_ev", episode)
+        env = make_env("boxing_videos_reinforce", episode)
         state, _ = env.reset()
         done = False
         truncated = False
