@@ -1,0 +1,274 @@
+#import packages
+import supersuit as ss
+from pettingzoo.atari import pong_v3
+import numpy as np
+from stable_baselines3 import DQN
+import gymnasium
+import wandb
+from wandb.integration.sb3 import WandbCallback
+import torch
+import os
+import matplotlib.pyplot as plt
+from stable_baselines3.common.callbacks import BaseCallback
+import pandas as pd
+
+#track metrics
+class MetricsCallback(BaseCallback):
+    def __init__(self, agent_id, verbose=0, save_path=None):
+        super().__init__(verbose)
+        #init params
+        self.agent_id = agent_id
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.rolling_rewards = []
+        self.rolling_window = 100
+        self.save_path = save_path
+        self.best_mean_reward = -np.inf
+        self.best_model_path = None
+
+    def _on_step(self) -> bool:
+        #log episode rewards
+        if self.locals.get('dones'):
+            reward = self.locals['rewards'][0]
+            self.episode_rewards.append(reward)
+            
+            #log metrics specifying agent
+            metrics_dict = {
+                f"{self.agent_id}/episode_reward": reward,
+                f"{self.agent_id}/episode_length": self.locals.get('n_steps', 0),
+                f"{self.agent_id}/exploration_rate": self.model.exploration_rate,
+                f"{self.agent_id}/learning_rate": self.locals['infos'][0].get('learning_rate', 0),
+                f"{self.agent_id}/buffer_size": self.model.replay_buffer.size() if hasattr(self.model.replay_buffer, 'size') else 0,
+            }
+
+            #rolling rewards and save best model
+            if len(self.episode_rewards) >= self.rolling_window:
+                mean_reward = np.mean(self.episode_rewards[-self.rolling_window:])
+                self.rolling_rewards.append(mean_reward)
+                metrics_dict[f"{self.agent_id}/rolling_reward"] = mean_reward
+                
+                #save best model
+                if mean_reward > self.best_mean_reward and self.save_path:
+                    self.best_mean_reward = mean_reward
+
+                    best_model_path = os.path.join(self.save_path, "best_model.zip")
+                    self.model.save(best_model_path)
+                    print(f"\n{self.agent_id} - New best model saved with mean reward: {mean_reward:.2f}")
+                    metrics_dict[f"{self.agent_id}/best_mean_reward"] = mean_reward
+            
+            #keep track of episodes rewards while training
+            print(f"{self.agent_id} - Episode {len(self.episode_rewards)}")
+            print(f"  Episode Reward: {reward:.2f}")
+            if len(self.rolling_rewards) > 0:
+                print(f"  Rolling Avg Reward (last {self.rolling_window}): {self.rolling_rewards[-1]:.2f}")
+            print("-" * 50)
+
+            #log to wandb
+            wandb.log(metrics_dict)
+
+        return True
+
+    def save_metrics(self, save_path):
+        #specific directories for each agent trained 
+        agent_dir = os.path.join(save_path, self.agent_id)
+        plots_dir = os.path.join(agent_dir, 'plots')
+        metrics_dir = os.path.join(agent_dir, 'metrics')
+        os.makedirs(plots_dir, exist_ok=True)
+        os.makedirs(metrics_dir, exist_ok=True)
+
+        #plot rewards
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.episode_rewards)
+        plt.title(f'{self.agent_id} Episode Rewards')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.savefig(os.path.join(plots_dir, 'episode_rewards.png'))
+        plt.close()
+
+        #plot rolling rewards
+        if self.rolling_rewards:
+            plt.figure(figsize=(10, 5))
+            plt.plot(self.rolling_rewards)
+            plt.title(f'{self.agent_id} Rolling Mean Reward (window={self.rolling_window})')
+            plt.xlabel('Episode')
+            plt.ylabel('Rolling Mean Reward')
+            plt.savefig(os.path.join(plots_dir, 'rolling_rewards.png'))
+            plt.close()
+
+        #save metrics in different formats
+        np.save(os.path.join(metrics_dir, 'episode_rewards.npy'), np.array(self.episode_rewards))
+        np.save(os.path.join(metrics_dir, 'rolling_rewards.npy'), np.array(self.rolling_rewards))
+
+        df = pd.DataFrame({
+            'episode': range(len(self.episode_rewards)),
+            'reward': self.episode_rewards,
+        })
+        if self.rolling_rewards:
+            df['rolling_reward'] = pd.Series(self.rolling_rewards, index=range(self.rolling_window-1, len(self.episode_rewards)))
+        df.to_csv(os.path.join(metrics_dir, 'metrics.csv'), index=False)
+
+def make_env(agent_idx=0):
+    #base env
+    env = pong_v3.parallel_env(render_mode=None)
+    
+    #preprocessing
+    env = ss.color_reduction_v0(env, mode="B")
+    env = ss.resize_v1(env, x_size=84, y_size=84) #specifying size(84 x 84)
+    env = ss.frame_stack_v1(env, 4) #stacking frames (4)
+    env = ss.dtype_v0(env, dtype=np.float32)
+    env = ss.normalize_obs_v0(env, env_min=0, env_max=1)
+    
+    #as we had multiple errors with Gymnasium, we had to create a custom wrapper as the already existing ones were not working
+    #custom wrapper --> Gymnasium compatible 
+    class GymCompatWrapper(gymnasium.Env):
+        def __init__(self, env, agent_idx):
+            #init params
+            self.env = env
+            self.agents = env.possible_agents
+            self.agent_idx = agent_idx
+            self.agent = self.agents[agent_idx]
+            
+            #specify obs space (4, 84, 84)
+            self.observation_space = gymnasium.spaces.Box(
+                low=0, high=1,
+                shape=(4, 84, 84),
+                dtype=np.float32
+            )
+            self.action_space = env.action_space(self.agent)
+        
+        #reset
+        def reset(self, **kwargs):
+            obs, _ = self.env.reset(**kwargs)
+            obs_agent = obs[self.agent]
+            obs_agent = np.transpose(obs_agent, (2, 0, 1))
+            return obs_agent, {}
+            
+        def step(self, action):
+            #actions for both agents (random for other agent)
+            actions = {agent: action if agent == self.agent else self.action_space.sample() 
+                      for agent in self.env.agents}
+            
+            obs, rewards, terminations, truncations, infos = self.env.step(actions)
+            
+            obs_agent = obs[self.agent]
+            reward_agent = rewards[self.agent]
+            terminated = terminations[self.agent]
+            truncated = truncations[self.agent]
+            
+            obs_agent = np.transpose(obs_agent, (2, 0, 1))
+            
+            return obs_agent, reward_agent, terminated, truncated, infos
+            
+        def render(self):
+            return self.env.render()
+            
+        def close(self):
+            return self.env.close()
+    
+    env = GymCompatWrapper(env, agent_idx)
+    return env
+
+if __name__ == "__main__":
+    #directories
+    os.makedirs("models", exist_ok=True)
+    
+    #GPU availability
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    #config params 
+    config = {
+        "algorithm": "DQN",
+        "total_timesteps": 1000000,
+        "learning_rate": 0.0001,
+        "buffer_size": 25000,
+        "learning_starts": 3000,
+        "batch_size": 64,
+        "train_freq": 4,
+        "gradient_steps": 4,
+        "target_update_interval": 1000,
+        "exploration_fraction": 0.1,
+        "exploration_final_eps": 0.01,
+        "device": str(device)
+    }
+    
+    #init wandb
+    wandb.login(key="KEY")
+    
+    #use config params for wandb
+    run = wandb.init(
+        project="pong-dqn",
+        name="pong_training_both_agents",
+        config=config
+    )
+    
+    #create envs and models (both agents)
+    envs = [make_env(i) for i in range(2)]
+    models = []
+    metrics_callbacks = []
+    wandb_callbacks = []
+    
+    for i, env in enumerate(envs):
+        agent_id = f"agent_{i}"
+        agent_dir = f"models/{run.id}/{agent_id}"
+        os.makedirs(agent_dir, exist_ok=True)
+        
+        #DQN model
+        model = DQN(
+            policy="CnnPolicy",
+            env=env,
+            learning_rate=config["learning_rate"],
+            buffer_size=config["buffer_size"],
+            learning_starts=config["learning_starts"],
+            batch_size=config["batch_size"],
+            train_freq=config["train_freq"],
+            gradient_steps=config["gradient_steps"],
+            target_update_interval=config["target_update_interval"],
+            exploration_fraction=config["exploration_fraction"],
+            exploration_final_eps=config["exploration_final_eps"],
+            tensorboard_log=None,
+            policy_kwargs={"normalize_images": False},
+            device=device,
+            verbose=1
+        )
+        models.append(model)
+        
+        #callbacks 
+        metrics_callbacks.append(MetricsCallback(
+            agent_id=agent_id,
+            save_path=agent_dir  #save each agent in its own dir
+        ))
+        wandb_callbacks.append(WandbCallback(
+            gradient_save_freq=100,
+            model_save_path=agent_dir,
+            verbose=2,
+        ))
+
+    try:
+        #train
+        for i in range(2):
+            print(f"\nTraining {metrics_callbacks[i].agent_id}")
+            models[i].learn(
+                total_timesteps=config["total_timesteps"],
+                progress_bar=False,
+                callback=[metrics_callbacks[i], wandb_callbacks[i]]
+            )
+            
+    except Exception as e:
+        print(f"Error during training: {e}")
+        for env in envs:
+            env.close()
+    finally:
+        #save final models and metrics 
+        try:
+            for i in range(2):
+                agent_id = f"agent_{i}"
+                agent_dir = f"models/{run.id}/{agent_id}"
+                #final model
+                models[i].save(os.path.join(agent_dir, "final_model.zip"))
+                metrics_callbacks[i].save_metrics(f"models/{run.id}")
+        except Exception as e:
+            print(f"Error saving models or metrics: {e}")
+        
+   
+        wandb.finish()
