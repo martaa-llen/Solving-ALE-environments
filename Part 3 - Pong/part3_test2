@@ -11,7 +11,7 @@ from PIL import Image
 import cv2
 import wandb
 
-#same function as part3_trainboth
+#same function as part3_train2
 def make_env(agent_idx=0):
     #base env
     env = pong_v3.parallel_env(render_mode=None)
