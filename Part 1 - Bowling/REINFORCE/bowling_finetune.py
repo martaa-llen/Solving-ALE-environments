@@ -28,7 +28,7 @@ if not os.path.exists("finetuned_bowling_videos"):
     os.makedirs("finetuned_bowling_videos")
 
 #load best model
-best_model_path = "/fhome/pmlai06/models_reinforce/bestmodel_8411.pth"
+best_model_path = "./Solving-ALE-environments/Part 1 - Bowling/REINFORCE/models_reinforce/bestmodel_8411.pth"
 agent = REINFORCEAgent(INPUT_SHAPE, ACTION_DIM, LEARNING_RATE, GAMMA)
 
 if os.path.exists(best_model_path):

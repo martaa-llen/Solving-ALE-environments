@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 #hyperparameters
 INPUT_SHAPE = (1, 210, 160)
 ACTION_DIM = 6 
- 
-MODEL_PATH = "./finetuned_bowling_models/best_model_63.pth" 
+
+MODEL_PATH = "./Solving-ALE-environments/Part 1 - Bowling/REINFORCE/finetuned_bowling_models/best_model_63.pth" 
 
 """Other models from the models_reinforce/finetuned_bowling_models can be loaded and evaluated, 
                     but we chose our best performing one """
