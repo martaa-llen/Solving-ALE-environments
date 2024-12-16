@@ -1,63 +1,64 @@
+#import packages
 import torch
 import gymnasium as gym
 from gymnasium.wrappers import RecordVideo
 from boxing_agent import BoxingREINFORCEAgent  # Import the agent class
 
-# Initialize environment and agent
+#init env and agent
 env = gym.make("ALE/Boxing-v5", render_mode="rgb_array")
 INPUT_SHAPE = (1, 210, 160)
 ACTION_DIM = env.action_space.n
 LEARNING_RATE = 1e-4
-GAMMA = 0.995# Discount factor for future rewards
+GAMMA = 0.995 #discount factor for future rewards
 
-# Create the agent
+#create the agent
 agent = BoxingREINFORCEAgent(INPUT_SHAPE, ACTION_DIM, LEARNING_RATE, GAMMA)
 
-# Load the best model
+#load the best model
 """Other models from the boxing_models_reinforce can be loaded and evaluated, 
                     but we chose our best performing one"""
 
 model_path = "/fhome/pmlai06/boxing_models_ev/best_boxing_model_20241209_094554_reward_-6.54.pth"
 agent.policy.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
 
-# Evaluation function with conditional video recording
+#eval function with conditional video recording
 def evaluate_agent(num_episodes=1000, video_folder="evaluation_videos_ev_box"):
     env = gym.make("ALE/Boxing-v5", render_mode="rgb_array")
     video_env = RecordVideo(env, video_folder=video_folder, episode_trigger=lambda x: True)
-    # Initialize counters for evaluation metrics
+    #init counters for evaluation metrics
     wins, losses, ties, ko_by_agent, ko_received, perfect_games = 0, 0, 0, 0, 0, 0
 
     for episode in range(num_episodes):
-        # Reset environment and variables
+        #reset env and variables
         state, _ = env.reset()
         done = False
         truncated = False
         agent_score, enemy_score = 0, 0
         received_hits = 0
-        time_elapsed = 0  # Track time elapsed in the episode
+        time_elapsed = 0  
         
-        # Check if KO occurs
+        #check if KO occurs
         ko_occurred = False
 
         while not (done or truncated):
             action, _, _, _ = agent.select_action(state, episode)
             next_state, reward, done, truncated, info = env.step(action)
             state = next_state
-            time_elapsed += 1  # Increment time elapsed
+            time_elapsed += 1  
 
-            # Update scores
+            #update scores
             if reward > 0:
                 agent_score += reward
             elif reward < 0:
                 enemy_score -= reward
                 received_hits += 1
 
-        # Determine match outcome
+        #match outcome
         if agent_score > enemy_score:
             wins += 1
-            if agent_score >= 50 and time_elapsed < 240:  # Check for KO condition
+            if agent_score >= 50 and time_elapsed < 240:  #check for KO condition
                 ko_by_agent += 1
-                ko_occurred = True  # KO occurred
+                ko_occurred = True  #KO occurred
             if received_hits == 0:
                 perfect_games += 1
         elif agent_score < enemy_score:
@@ -67,14 +68,14 @@ def evaluate_agent(num_episodes=1000, video_folder="evaluation_videos_ev_box"):
         else:
             ties += 1
 
-        # Record video if KO occurred
+        #record video if KO occurred
         if ko_occurred:
             record_video(env, video_folder, episode)
 
     env.close()
     video_env.close()
 
-    # Calculate percentages
+    #percentages
     total_episodes = num_episodes
     win_percentage = (wins / total_episodes) * 100
     loss_percentage = (losses / total_episodes) * 100
@@ -83,7 +84,7 @@ def evaluate_agent(num_episodes=1000, video_folder="evaluation_videos_ev_box"):
     ko_received_percentage = (ko_received / total_episodes) * 100
     perfect_game_percentage = (perfect_games / total_episodes) * 100
 
-    # Print evaluation results
+    #evaluation results
     print(f"Evaluation over {num_episodes} episodes:")
     print(f"Wins: {win_percentage:.2f}%")
     print(f"Losses: {loss_percentage:.2f}%")
@@ -102,5 +103,5 @@ def record_video(env, video_folder, episode):
         state, _, done, truncated, _ = env.step(action)
     env.close()
 
-# Run evaluation
+#evaluation
 evaluate_agent(num_episodes=1000)
