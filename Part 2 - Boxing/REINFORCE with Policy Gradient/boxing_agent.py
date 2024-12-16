@@ -1,4 +1,4 @@
-# Import packages
+#import packages
 import gymnasium as gym
 import numpy as np
 import torch
@@ -17,13 +17,15 @@ import datetime
 from torch.distributions import Categorical
 from collections import deque
 
-# Initialize wandb and environment
-wandb.login(key="KEY") # Replace with your key
+#init wandb and env
+wandb.login(key="KEY") 
 gym.register_envs(ale_py)
 
+#videos directory
+if not os.path.exists("videos_RL"):
+    os.makedirs("videos_RL")
 
-
-# Initialize environment
+#init env
 env = gym.make("ALE/Boxing-v5", render_mode="rgb_array")
 print("Action space is {} ".format(env.action_space))
 print("Observation space is {} ".format(env.observation_space))
@@ -47,7 +49,7 @@ class BoxingPolicyNetwork(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(self.conv_output_size, 512),
             nn.ReLU(),
-            nn.Dropout(0.2),  # Add dropout for regularization
+            nn.Dropout(0.2),  #dropout for regularization
             nn.Linear(512, 256),
             nn.ReLU(),
             nn.Linear(256, action_dim),
@@ -66,7 +68,7 @@ class BoxingPolicyNetwork(nn.Module):
         x = x.view(x.size(0), -1)
         return self.fc(x)
 
-# Add a value network (critic) to reduce variance
+#value network (critic) --> reduce variance
 class BoxingValueNetwork(nn.Module):
     def __init__(self, input_shape):
         super(BoxingValueNetwork, self).__init__()
@@ -87,7 +89,7 @@ class BoxingValueNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(512, 256),
             nn.ReLU(),
-            nn.Linear(256, 1)  # Output a single value
+            nn.Linear(256, 1)  
         )
 
     def _get_conv_output(self, shape):
@@ -102,7 +104,7 @@ class BoxingValueNetwork(nn.Module):
         x = x.view(x.size(0), -1)
         return self.fc(x)
 
-# Modify the REINFORCE agent to include the baseline
+#include baseline in REINFORCE agent
 class BoxingREINFORCEAgent:
     def __init__(self, input_shape, action_dim, learning_rate=1e-4, gamma=0.99):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -117,18 +119,18 @@ class BoxingREINFORCEAgent:
         
         self.gamma = 0.995
         self.entropy_coef = 0.05
-        self.value_coef = 0.5  # Weight for value loss
+        self.value_coef = 0.5  #weight for value loss
         self.eps_start = 0.99
         self.eps_end = 0.1
         self.eps_decay = 5000
         
-        # Add experience replay buffer
-        self.memory = deque(maxlen=10000)  # Store last 10000 transitions
+        #experience replay buffer
+        self.memory = deque(maxlen=10000)  #store last 10000 transitions
         self.batch_size = 32
-        self.min_replay_size = 1000  # Min experiences before training
+        self.min_replay_size = 1000  #min experiences before training
 
     def preprocess_state(self, state):
-        # Add frame stacking for better temporal information
+        #frame stacking 
         processed_state = np.mean(state, axis=2).astype(np.float32)
         processed_state = np.expand_dims(processed_state, axis=0)
         return torch.FloatTensor(processed_state).unsqueeze(0).to(self.device)
@@ -158,10 +160,10 @@ class BoxingREINFORCEAgent:
         )
 
     def compute_returns(self, rewards, values):
-        # Add reward shaping to encourage aggressive behavior
+        #reward shaping --> aggressive behavior
         shaped_rewards = []
         for r in rewards:
-            # Amplify positive rewards and reduce penalty of negative rewards
+            #amplify positive rewards and reduce penalty of negative rewards
             shaped_r = r * 1.5 if r > 0 else r * 0.7
             shaped_rewards.append(shaped_r)
         
@@ -205,7 +207,7 @@ class BoxingREINFORCEAgent:
         rewards = torch.FloatTensor([t['reward'] for t in batch]).to(self.device)
         dones = torch.FloatTensor([t['done'] for t in batch]).to(self.device)
         
-        # Filter out None values for policy gradient components
+        #filter out None values for policy gradient components
         policy_batch = [t for t in batch if t['log_prob'] is not None]
         if policy_batch:
             log_probs = torch.stack([t['log_prob'] for t in policy_batch])
@@ -220,10 +222,10 @@ class BoxingREINFORCEAgent:
         if len(self.memory) < self.min_replay_size:
             return 0.0, 0.0
             
-        # Sample multiple batches for more stable training
+        #sample multiple batches for more stable training
         total_policy_loss = 0
         total_value_loss = 0
-        n_updates = 4  # Number of updates per episode
+        n_updates = 4  
         
         for _ in range(n_updates):
             states, next_states, rewards, dones, batch_log_probs, batch_entropies, batch_values = self.sample_batch()
@@ -231,21 +233,21 @@ class BoxingREINFORCEAgent:
             if batch_log_probs is None:
                 continue
                 
-            # Compute returns and advantages for the batch
+            #returns and advantages for the batch
             batch_returns, batch_advantages = self.compute_returns(rewards.cpu().numpy(), batch_values)
             
-            # Policy loss
+            #policy loss
             policy_loss = []
             for log_prob, advantage, entropy in zip(batch_log_probs, batch_advantages, batch_entropies):
                 policy_loss.append(-log_prob * advantage - self.entropy_coef * entropy)
             policy_loss = torch.stack(policy_loss).sum()
             
-            # Value loss
+            #value loss
             value_targets = batch_returns.unsqueeze(-1)
             value_pred = torch.cat(batch_values)
             value_loss = nn.MSELoss()(value_pred, value_targets)
             
-            # Update networks
+            #update networks
             self.policy_optimizer.zero_grad()
             policy_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=1.0)
@@ -262,14 +264,14 @@ class BoxingREINFORCEAgent:
         return total_policy_loss / n_updates, total_value_loss / n_updates
 
 if __name__ == "__main__":
-    # Hyperparameters optimized for Boxing
+    #hyperparameters optimized for Boxing
     INPUT_SHAPE = (1, 210, 160)
     ACTION_DIM = env.action_space.n
-    LEARNING_RATE = 1e-4  # Increase learning rate
+    LEARNING_RATE = 1e-4 
     GAMMA = 0.995
-    NUM_EPISODES = 10000  # Train for longer
+    NUM_EPISODES = 10000  
 
-    # Initialize agent and wandb
+    #init agent and wandb
     agent = BoxingREINFORCEAgent(INPUT_SHAPE, ACTION_DIM, LEARNING_RATE, GAMMA)
     wandb.init(
         project="boxing-reinforce2",
@@ -281,30 +283,29 @@ if __name__ == "__main__":
         }
     )
 
-    # Training loop
+    #training
     episode_rewards = []
     best_mean_reward = float('-inf')
 
-    # After environment imports, add directories
-    for directory in ["boxing_models_reinforce", "boxing_videos_reinforce"]:
+    #directories
+    for directory in ["boxing_models_ev", "boxing_vids_ev"]:
         if not os.path.exists(directory):
             os.makedirs(directory)
 
-    # Replace the simple env creation with a wrapper for video recording
+    #change simple env with a wrapper for video recording
     def make_env(video_folder, episode):
         env = gym.make("ALE/Boxing-v5", render_mode="rgb_array")
-        if episode % 100 == 0:  # Record every 100th episode
+        if episode % 100 == 0:  
             env = RecordVideo(
                 env, 
                 video_folder=video_folder,
-                episode_trigger=lambda x: True,  # Record all episodes when wrapped
+                episode_trigger=lambda x: True,  #record all episodes when wrapped
                 name_prefix=f"episode_{episode}"
             )
         return env
 
     for episode in range(NUM_EPISODES):
-        # Create environment with potential recording
-        env = make_env("boxing_videos_reinforce", episode)
+        env = make_env("boxing_vids_ev", episode)
         state, _ = env.reset()
         done = False
         truncated = False
@@ -314,8 +315,8 @@ if __name__ == "__main__":
         entropies = []
         values = []
         
-        # Episode loop
         while not (done or truncated):
+            #sel action
             action, log_prob, entropy, value = agent.select_action(state, episode)
             
             reward = 0
@@ -333,7 +334,7 @@ if __name__ == "__main__":
             episode_reward += reward
             state = next_state
         
-        # Update policy after episode
+        #update policy after episode
         if log_probs:
             returns, advantages = agent.compute_returns(rewards, values)
             policy_loss, value_loss = agent.update(log_probs, returns, advantages, values, entropies)
@@ -341,7 +342,7 @@ if __name__ == "__main__":
             episode_rewards.append(episode_reward)
             mean_reward = np.mean(episode_rewards[-100:]) if len(episode_rewards) >= 100 else np.mean(episode_rewards)
             
-            # Add value loss to wandb logging
+            #log metrics 
             wandb.log({
                 "episode": episode,
                 "reward": episode_reward,
@@ -351,11 +352,10 @@ if __name__ == "__main__":
                 "value_loss": value_loss
             })
         
-        # Save best model
+        #save best model with timestamp
         if mean_reward > best_mean_reward and len(episode_rewards) >= 100:
             best_mean_reward = mean_reward
-            
-            # Save best model with timestamp
+
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             model_path = os.path.join(
                 "boxing_models_ev", 
@@ -363,14 +363,14 @@ if __name__ == "__main__":
             )
             torch.save(agent.policy.state_dict(), model_path)
             
-            # Record a video of the best performance
+            #record a video 
             eval_env = RecordVideo(
                 gym.make("ALE/Boxing-v5", render_mode="rgb_array"),
                 video_folder="boxing_vids_ev",
                 name_prefix=f"best_model_{timestamp}_reward_{mean_reward:.2f}"
             )
             
-            # Record one episode with the best model
+            #record one episode with best model
             eval_state, _ = eval_env.reset()
             eval_done = False
             eval_truncated = False
@@ -379,7 +379,7 @@ if __name__ == "__main__":
                 eval_state, _, eval_done, eval_truncated, _ = eval_env.step(eval_action)
             eval_env.close()
         
-        # Save regular checkpoint every 1000 episodes
+        #regular checkpoint every 1000 episodes
         if (episode + 1) % 1000 == 0:
             checkpoint_path = os.path.join(
                 "boxing_models_ev", 
@@ -393,13 +393,11 @@ if __name__ == "__main__":
                 'episode_rewards': episode_rewards,
             }, checkpoint_path)
         
-        # Close the environment at the end of each episode
         env.close()
         
-        # Print progress
+        #progress
         if (episode + 1) % 10 == 0:
             print(f"Episode {episode + 1}/{NUM_EPISODES} | Reward: {episode_reward:.2f} | Mean Reward: {mean_reward:.2f}")
 
-    # Close environment and wandb
     env.close()
     wandb.finish()
