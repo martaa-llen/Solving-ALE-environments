@@ -14,7 +14,7 @@ import ale_py
 import matplotlib.pyplot as plt
 
 #init wandb and env
-wandb.login(key="d8738b5e1ef25c35029e7b3cf2277ca9bd65b068")
+wandb.login(key="KEY")
 gym.register_envs(ale_py)
 
 #videos directory
