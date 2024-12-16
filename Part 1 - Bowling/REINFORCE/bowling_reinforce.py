@@ -1,4 +1,4 @@
-# Import packages
+#import packages
 import gymnasium as gym
 import numpy as np
 import torch
@@ -13,26 +13,25 @@ from PIL import Image
 import ale_py
 import matplotlib.pyplot as plt
 
-# Initialize wandb and environment
-wandb.login(key="KEY")
+#init wandb and env
+wandb.login(key="d8738b5e1ef25c35029e7b3cf2277ca9bd65b068")
 gym.register_envs(ale_py)
 
-# Create videos directory
-if not os.path.exists("videos_RL"):
-    os.makedirs("videos_RL")
+#videos directory
+if not os.path.exists("videos_bowling_reinforcement"):
+    os.makedirs("videos_bowling_reinforcement")
 
-# Create directories if they don't exist
-if not os.path.exists("models"):
-    os.makedirs("models")
-if not os.path.exists("videos_RL"):
-    os.makedirs("videos_RL")
+#model directory
+if not os.path.exists("models_reinforce"):
+    os.makedirs("models_reinforce")
 
-# Initialize environment first
+
+#init env
 env = gym.make("ALE/Bowling-v5", render_mode="rgb_array")
 print("Action space is {} ".format(env.action_space))
 print("Observation space is {} ".format(env.observation_space))
 
-# Hyperparameters
+#hyperparameters
 INPUT_SHAPE = (1, 210, 160)
 ACTION_DIM = env.action_space.n
 LEARNING_RATE = 1e-4
@@ -40,6 +39,7 @@ GAMMA = 0.99
 NUM_EPISODES = 10000
 MAX_STEPS = 1000
 
+#policy network
 class PolicyNetwork(nn.Module):
     def __init__(self, input_shape, action_dim):
         super(PolicyNetwork, self).__init__()
@@ -73,12 +73,12 @@ class PolicyNetwork(nn.Module):
     
 
 REWARD_MULTIPLIERS = {
-    'PIN_KNOCKED': 2.0,        # Increased base multiplier
-    'STRIKE': 10.0,            # Increased strike bonus
-    'CONSECUTIVE_STRIKE': 5.0,  # Increased consecutive bonus
-    'SPARE': 5.0,              # Increased spare bonus
-    'GUTTER_PENALTY': -0.5,    # Reduced penalty
-    'SCORE_PROGRESS': 1.0      # Increased progress reward
+    'PIN_KNOCKED': 2.0,        
+    'STRIKE': 10.0,            
+    'CONSECUTIVE_STRIKE': 5.0, 
+    'SPARE': 5.0,              
+    'GUTTER_PENALTY': -0.5,    
+    'SCORE_PROGRESS': 1.0      
 }
 
 class REINFORCEAgent:
@@ -86,7 +86,7 @@ class REINFORCEAgent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
         
-        self.action_dim = action_dim  # Add this line
+        self.action_dim = action_dim  
         self.policy = PolicyNetwork(input_shape, action_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
         self.gamma = gamma
@@ -108,7 +108,7 @@ class REINFORCEAgent:
                math.exp(-1. * episode / self.eps_decay)
     
     def select_action(self, state, episode):
-        # Add epsilon-greedy exploration
+        #epsilon-greedy exploration
         if random.random() < self.get_exploration_rate(episode):
             action = random.randrange(self.action_dim)
             return action, None, None
@@ -133,7 +133,7 @@ class REINFORCEAgent:
         return returns
     
     def update(self, log_probs, returns, entropies):
-        if not log_probs:  # Skip update if action was from exploration
+        if not log_probs:  #skip update if action was from exploration
             return 0.0
             
         policy_loss = []
@@ -142,7 +142,7 @@ class REINFORCEAgent:
         
         policy_loss = torch.stack(policy_loss).sum()
         
-        # Add gradient clipping and scaling
+        #gradient clipping and scaling
         self.optimizer.zero_grad()
         policy_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
@@ -153,17 +153,17 @@ class REINFORCEAgent:
         """Modified reward shaping based on actual environment rewards"""
         shaped_reward = 0.0
         
-        # Base reward to prevent extremely negative starts
-        shaped_reward = 0.1  # Small positive baseline
+        #base reward to prevent extremely negative starts
+        shaped_reward = 0.1  #small positive baseline
         
-        # The original reward from the environment indicates pins knocked down
-        pins_knocked = max(0, reward)  # Ensure non-negative
+        #og reward from the environment indicates pins knocked down
+        pins_knocked = max(0, reward) 
         
-        # Base reward for any pins knocked down
+        #base reward for any pins knocked down
         if pins_knocked > 0:
             shaped_reward += pins_knocked * self.reward_multipliers['PIN_KNOCKED']
             
-            # Detect strike (10 pins)
+            #strike (10 pins)
             if pins_knocked == 10:
                 strike_reward = self.reward_multipliers['STRIKE']
                 shaped_reward += strike_reward
@@ -172,20 +172,20 @@ class REINFORCEAgent:
                                     self.reward_multipliers['CONSECUTIVE_STRIKE'])
                 shaped_reward += consecutive_reward
             
-            # Detect spare (remaining pins from previous throw)
+            #spare (remaining pins from previous throw)
             elif pins_knocked == self.previous_pins_remaining:
                 spare_reward = self.reward_multipliers['SPARE']
                 shaped_reward += spare_reward
         
-        # Store the remaining pins for spare detection
+        #store the remaining pins for spare detection
         self.previous_pins_remaining = 10 - pins_knocked if pins_knocked < 10 else 10
         
-        # Add small reward for staying alive
+        #small reward for staying alive
         if not done:
             shaped_reward += 0.1
         
-        # Clip rewards to reasonable range
-        shaped_reward = np.clip(shaped_reward, -1.0, 30.0)  # Increased upper bound
+        #clip rewards to reasonable range
+        shaped_reward = np.clip(shaped_reward, -1.0, 30.0)  
         
         return shaped_reward
     
@@ -195,10 +195,10 @@ class REINFORCEAgent:
         self.consecutive_strikes = 0
         self.frame_count = 0
 
-if __name__ == "__main__":#only run when main
+if __name__ == "__main__":
    
 
-    # Initialize agent and wandb
+    #init agent and wandb
     agent = REINFORCEAgent(INPUT_SHAPE, ACTION_DIM, LEARNING_RATE, GAMMA)
     wandb.init(
         project="bowling-reinforce",
@@ -209,20 +209,20 @@ if __name__ == "__main__":#only run when main
         }
     )
 
-    # Initialize metrics
+    #init metrics
     best_episode_reward = float('-inf')
     episode_rewards = []
     losses = []
     rolling_rewards = []
     rolling_losses = []
     best_episode_images = []
-    # In the training loop
+    #training loop
     total_rewards = []
     strikes = 0
     spares = 0
 
     for episode in range(NUM_EPISODES):
-        if episode % 10 == 0:  # Episode start logging
+        if episode % 10 == 0:  #logs
             print(f"\n{'='*50}")
             print(f"Starting Episode {episode}")
             print(f"{'='*50}")
@@ -231,13 +231,13 @@ if __name__ == "__main__":#only run when main
         state = env.reset()[0]
         episode_reward = 0
         images = []
-        step_rewards = []  # Track rewards for each step
+        step_rewards = []  #rewards for each step
         
-        # Reset agent stats
+        #reset agent stats
         agent.reset_episode_stats()
         
         for step in range(MAX_STEPS):
-            # Log every 100 steps
+            #log every 100 steps
             if step % 100 == 0:
                 print(f"\nEpisode {episode} - Step {step}")
                 print(f"Current episode reward: {episode_reward:.2f}")
@@ -246,12 +246,12 @@ if __name__ == "__main__":#only run when main
                     print(f"Average step reward: {np.mean(step_rewards):.3f}")
                 print(f"-"*30)
             
-            # Record frame if needed
+            #record frame
             if should_record:
                 img = Image.fromarray(state)
                 images.append(img)
             
-            # Take action
+            #sel action
             action, log_prob, entropy = agent.select_action(state, episode)
             next_state, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
@@ -264,7 +264,7 @@ if __name__ == "__main__":#only run when main
                 break
             state = next_state
         
-        # Episode end logging (every 10 episodes)
+        #log ep
         if episode % 10 == 0:
             print(f"\n{'*'*50}")
             print(f"Episode {episode} Complete")
@@ -277,7 +277,7 @@ if __name__ == "__main__":#only run when main
             print(f"Exploration Rate: {agent.get_exploration_rate(episode):.3f}")
             print(f"{'*'*50}\n")
             
-            # Log to wandb
+            #log to wandb
             wandb.log({
                 "episode": episode,
                 "reward": episode_reward,
@@ -288,7 +288,7 @@ if __name__ == "__main__":#only run when main
                 "average_step_reward": np.mean(step_rewards)
             })
         
-        # Save best model and video (existing code)
+        #save best model and video
         if episode_reward > best_episode_reward:
             best_episode_reward = episode_reward
             print(f"\nNew Best Episode! Episode {episode}")
@@ -320,19 +320,18 @@ if __name__ == "__main__":#only run when main
             except Exception as e:
                 print(f"Error saving model or video: {e}")
 
-    # Make sure directories exist
-    import os
-    if not os.path.exists("videos_RL"):
-        os.makedirs("videos_RL")
-    if not os.path.exists("models"):
-        os.makedirs("models")
 
-    # Final cleanup
-    wandb.save("videos_RL/best_episode.gif")
+    if not os.path.exists("videos_bowling_reinforcement"):
+        os.makedirs("videos_bowling_reinforcement")
+    if not os.path.exists("models_reinforce"):
+        os.makedirs("models_reinforce")
+
+    #save wandb
+    wandb.save("videos_bowling_reinforcement/best_episode.gif")
     wandb.finish()
     env.close()
 
-    # Plot final results
+    #plot final results
     plt.figure(figsize=(15, 10))
     plt.subplot(2, 2, 1)
     plt.plot(episode_rewards, alpha=0.3, label='Episode Reward')
