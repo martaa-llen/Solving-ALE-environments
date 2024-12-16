@@ -1,0 +1,245 @@
+#import packages
+import supersuit as ss
+from pettingzoo.atari import pong_v3
+import numpy as np
+from stable_baselines3 import DQN
+import gymnasium
+import torch
+import os
+import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
+import wandb
+
+#same function as part3_train2
+def make_env(agent_idx=0):
+    #base env
+    env = pong_v3.parallel_env(render_mode=None)
+    
+    #preprocessing
+    env = ss.color_reduction_v0(env, mode="B")
+    env = ss.resize_v1(env, x_size=84, y_size=84) #specifying size(84 x 84)
+    env = ss.frame_stack_v1(env, 4) #stacking frames (4)
+    env = ss.dtype_v0(env, dtype=np.float32)
+    env = ss.normalize_obs_v0(env, env_min=0, env_max=1)
+    
+    #as we had multiple errors with Gymnasium, we had to create a custom wrapper as the already existing ones were not working
+    #custom wrapper --> Gymnasium compatible 
+    class GymCompatWrapper(gymnasium.Env):
+        def __init__(self, env, agent_idx):
+            #init params
+            self.env = env
+            self.agents = env.possible_agents
+            self.agent_idx = agent_idx
+            self.agent = self.agents[agent_idx]
+            
+            #specify obs space (4, 84, 84)
+            self.observation_space = gymnasium.spaces.Box(
+                low=0, high=1,
+                shape=(4, 84, 84),
+                dtype=np.float32
+            )
+            self.action_space = env.action_space(self.agent)
+        
+        #reset
+        def reset(self, **kwargs):
+            obs, _ = self.env.reset(**kwargs)
+            obs_agent = obs[self.agent]
+            obs_agent = np.transpose(obs_agent, (2, 0, 1))
+            return obs_agent, {}
+            
+        def step(self, action):
+            #actions for both agents (random for other agent)
+            actions = {agent: action if agent == self.agent else self.action_space.sample() 
+                      for agent in self.env.agents}
+            
+            obs, rewards, terminations, truncations, infos = self.env.step(actions)
+            
+            obs_agent = obs[self.agent]
+            reward_agent = rewards[self.agent]
+            terminated = terminations[self.agent]
+            truncated = truncations[self.agent]
+            
+            obs_agent = np.transpose(obs_agent, (2, 0, 1))
+            
+            return obs_agent, reward_agent, terminated, truncated, infos
+            
+        def render(self):
+            return self.env.render()
+            
+        def close(self):
+            return self.env.close()
+    
+    env = GymCompatWrapper(env, agent_idx)
+    return env
+
+
+def evaluate_models(model_path, num_episodes=100, render=True):
+    #envs for both agents 
+    envs = [pong_v3.parallel_env(render_mode="rgb_array") for _ in range(1)]  
+    wrapped_envs = [make_env(i) for i in range(2)] #wrapped envs for both agents
+    models = []
+    
+    #load models
+    for i in range(2):
+        agent_id = f"agent_{i}"
+        model_file = os.path.join(model_path, agent_id, "best_model.zip")
+        if not os.path.exists(model_file):
+            raise FileNotFoundError(f"Model file not found: {model_file}")
+        
+        models.append(DQN.load(model_file))
+        print(f"Loaded model for {agent_id}")
+
+    #eval metrics
+    episode_rewards = {f"agent_{i}": [] for i in range(2)}
+    best_score_diff = float('-inf')  #highest score difference
+    best_episode_frames = []
+    best_agent_frames = {f"agent_{i}": [] for i in range(2)}  #frames for each agent's best performance
+    best_agent_scores = {f"agent_{i}": float('-inf') for i in range(2)}  #best score for each agent
+    
+    for episode in range(num_episodes):
+        #reset envs
+        obs = [env.reset()[0] for env in wrapped_envs]
+        env_frames = []  
+        done = [False] * 2
+        episode_reward = [0] * 2
+        
+        render_obs = envs[0].reset()
+        
+        while not any(done):
+            #actions both models
+            actions = [model.predict(ob, deterministic=True)[0] for model, ob in zip(models, obs)]
+            
+            #step envs
+            for i in range(2):
+                obs[i], rewards, terminated, truncated, _ = wrapped_envs[i].step(actions[i])
+                done[i] = terminated or truncated
+                episode_reward[i] += rewards
+            
+            #capture frame
+            render_actions = {agent: action for agent, action in zip(envs[0].agents, actions)}
+            render_obs, _, _, _, _ = envs[0].step(render_actions)
+            frame = envs[0].render()
+            frame_pil = Image.fromarray(frame)
+            env_frames.append(frame_pil)
+        
+        #save episode rewards
+        score_diff = abs(episode_reward[0] - episode_reward[1])  
+        for i in range(2):
+            agent_id = f"agent_{i}"
+            episode_rewards[agent_id].append(episode_reward[i])
+            #update best score and frames for each agent
+            if episode_reward[i] > best_agent_scores[agent_id]:
+                best_agent_scores[agent_id] = episode_reward[i]
+                best_agent_frames[agent_id] = env_frames.copy()
+            
+        #update best competitive episode
+        if score_diff > best_score_diff:
+            best_score_diff = score_diff
+            best_episode_frames = env_frames.copy()
+            
+        print(f"Episode {episode + 1}/{num_episodes}")
+        print(f"Agent 0 Reward: {episode_reward[0]:.2f}")
+        print(f"Agent 1 Reward: {episode_reward[1]:.2f}")
+        print(f"Score Difference: {score_diff:.2f}")
+        print("-" * 50)
+
+    #close envs 
+    for env in envs + wrapped_envs:
+        env.close()
+
+    #save videos
+    if best_episode_frames:
+        #init wandb
+        wandb.init(project="pong-dqn", name="model_evaluation", resume=True)
+        
+        #most competitive game
+        video_path = os.path.join(model_path, "best_competitive_episode.mp4")
+        save_video(best_episode_frames, video_path)
+        wandb.log({"best_competitive_episode": wandb.Video(video_path, fps=30, format="mp4")})
+        
+        #each agent's best performance
+        for agent_id, frames in best_agent_frames.items():
+            video_path = os.path.join(model_path, f"{agent_id}_best_episode.mp4")
+            save_video(frames, video_path)
+            wandb.log({f"{agent_id}_best_episode": wandb.Video(video_path, fps=30, format="mp4")})
+        
+        #Plot results
+        plt.figure(figsize=(12, 6))
+        for agent_id, rewards in episode_rewards.items():
+            plt.plot(rewards, label=agent_id)
+        plt.title("Evaluation Results")
+        plt.xlabel("Episode")
+        plt.ylabel("Reward")
+        plt.legend()
+        
+        plt.savefig(os.path.join(model_path, "evaluation_results.png"))
+        
+        #log to wandb
+        metrics = {}
+        metrics["evaluation_plot"] = wandb.Image(plt)
+        metrics["evaluation_metrics"] = {}
+        for agent_id, rewards in episode_rewards.items():
+            metrics["evaluation_metrics"].update({
+                f"{agent_id}/mean_reward": np.mean(rewards),
+                f"{agent_id}/std_reward": np.std(rewards),
+                f"{agent_id}/min_reward": min(rewards),
+                f"{agent_id}/max_reward": max(rewards)
+            })
+        wandb.log(metrics)
+        
+        plt.close()
+
+
+        wandb.finish()
+
+    #summary 
+    print("\nEvaluation Summary:")
+    for agent_id, rewards in episode_rewards.items():
+        mean_reward = np.mean(rewards)
+        std_reward = np.std(rewards)
+        print(f"{agent_id}:")
+        print(f"  Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+        print(f"  Min reward: {min(rewards):.2f}")
+        print(f"  Max reward: {max(rewards):.2f}")
+
+def save_video(frames, video_path):
+    """Helper function to save frames as video"""
+    if frames:
+        #size first frame
+        frame_size = frames[0].size
+        
+        #video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(video_path, fourcc, 30.0, frame_size)
+        
+        #write frames to video
+        for frame in frames:
+            #convert PIL image to OpenCV format
+            frame_cv = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+            out.write(frame_cv)
+            
+        out.release()
+        print(f"Video saved at: {video_path}")
+
+if __name__ == "__main__":
+    #GPU availability
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    wandb.login(key="KEY")
+    
+    #run ID from wandb
+    run_id = "jagv7sdh"
+    model_path = f"models/{run_id}"
+    
+    #check if models exist
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model directory not found: {model_path}")
+    
+    #eval models
+    evaluate_models(
+        model_path=model_path,
+        num_episodes=100,  
+        render=True  
+    )

@@ -1,0 +1,207 @@
+import supersuit as ss
+from pettingzoo.atari import pong_v3
+import numpy as np
+from stable_baselines3 import DQN
+import gymnasium
+import torch
+import os
+import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
+import wandb
+
+#same function as part3_train1
+def make_env():
+    #create env
+    env = pong_v3.parallel_env(render_mode=None)
+    
+    #preprocessing
+    env = ss.color_reduction_v0(env, mode="B")
+    env = ss.resize_v1(env, x_size=84, y_size=84) #specifying size(84 x 84)
+    env = ss.frame_stack_v1(env, 4) #stacking frames (4)
+    env = ss.dtype_v0(env, dtype=np.float32)
+    env = ss.normalize_obs_v0(env, env_min=0, env_max=1)
+    
+    #as we had multiple errors with Gymnasium, we had to create a custom wrapper as the already existing ones were not working
+    #custom wrapper --> Gymnasium compatible
+    class GymCompatWrapper(gymnasium.Env):
+        def __init__(self, env):
+            self.env = env
+            self.agents = env.possible_agents
+            #specify obs space (4, 84, 84)
+            self.observation_space = gymnasium.spaces.Box(
+                low=0, high=1,
+                shape=(4, 84, 84),
+                dtype=np.float32
+            )
+            self.action_space = env.action_space(self.agents[0])
+
+        #reset   
+        def reset(self, **kwargs):
+            obs, _ = self.env.reset(**kwargs)
+            obs_first = obs[self.agents[0]]
+            obs_first = np.transpose(obs_first, (2, 0, 1))
+            return obs_first, {}
+            
+        def step(self, action):
+            actions = {agent: action for agent in self.env.agents}
+            obs, rewards, terminations, truncations, infos = self.env.step(actions)
+            
+            obs_first = obs[self.agents[0]]
+            reward_first = rewards[self.agents[0]]
+            terminated = terminations[self.agents[0]]
+            truncated = truncations[self.agents[0]]
+            
+            obs_first = np.transpose(obs_first, (2, 0, 1))
+            
+            return obs_first, reward_first, terminated, truncated, infos
+            
+        def render(self):
+            return self.env.render()
+            
+        def close(self):
+            return self.env.close()
+    
+    env = GymCompatWrapper(env)
+    return env
+
+
+def evaluate_model(model_path, num_episodes=100, render=True):
+    #env for eval
+    env_render = pong_v3.parallel_env(render_mode="rgb_array")
+    wrapped_env = make_env()
+    
+    #load model
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    model = DQN.load(model_path)
+    print(f"Loaded model from {model_path}")
+
+    #eval metrics
+    episode_rewards = []
+    best_reward = float('-inf')
+    best_episode_frames = []
+    
+    for episode in range(num_episodes):
+        #reset envs
+        obs, _ = wrapped_env.reset()
+        env_frames = []  
+        done = False
+        episode_reward = 0
+        
+        render_obs = env_render.reset()
+        
+        while not done:
+            #get action from model
+            action = model.predict(obs, deterministic=True)[0]
+            
+            #step env
+            obs, reward, terminated, truncated, _ = wrapped_env.step(action)
+            done = terminated or truncated
+            episode_reward += reward
+            
+            #capture frame
+            render_actions = {agent: action for agent in env_render.agents}
+            render_obs, _, _, _, _ = env_render.step(render_actions)
+            frame = env_render.render()
+            frame_pil = Image.fromarray(frame)
+            env_frames.append(frame_pil)
+        
+        #save rewards
+        episode_rewards.append(episode_reward)
+            
+        #update best episode 
+        if episode_reward > best_reward:
+            best_reward = episode_reward
+            best_episode_frames = env_frames.copy()
+            
+        print(f"Episode {episode + 1}/{num_episodes}")
+        print(f"Reward: {episode_reward:.2f}")
+        print(f"Best Reward: {best_reward:.2f}")
+        print("-" * 50)
+
+    wrapped_env.close()
+    env_render.close()
+
+    #save video 
+    if best_episode_frames:
+        #init wandb 
+        wandb.init(project="pong-dqn", name="model_evaluation_single", resume=True)
+        
+        #save best episode
+        video_path = os.path.join(os.path.dirname(model_path), "best_episode.mp4")
+        save_video(best_episode_frames, video_path)
+        wandb.log({"best_episode": wandb.Video(video_path, fps=30, format="mp4")})
+        
+        #plot results
+        plt.figure(figsize=(12, 6))
+        plt.plot(episode_rewards, label="agent")
+        plt.title("Evaluation Results")
+        plt.xlabel("Episode")
+        plt.ylabel("Reward")
+        plt.legend()
+        
+        plot_path = os.path.join(os.path.dirname(model_path), "evaluation_results.png")
+        plt.savefig(plot_path)
+        
+        #log to wandb
+        metrics = {
+            "evaluation_plot": wandb.Image(plt),
+            "evaluation_metrics": {
+                "mean_reward": np.mean(episode_rewards),
+                "std_reward": np.std(episode_rewards),
+                "min_reward": min(episode_rewards),
+                "max_reward": max(episode_rewards)
+            }
+        }
+        wandb.log(metrics)
+        
+        plt.close()
+        
+        wandb.finish()
+
+    #summary
+    print("\nEvaluation Summary:")
+    mean_reward = np.mean(episode_rewards)
+    std_reward = np.std(episode_rewards)
+    print(f"Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+    print(f"Min reward: {min(episode_rewards):.2f}")
+    print(f"Max reward: {max(episode_rewards):.2f}")
+
+def save_video(frames, video_path):
+    """Helper function to save frames as video"""
+    if frames:
+        #size first frame
+        frame_size = frames[0].size
+        
+        #video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(video_path, fourcc, 30.0, frame_size)
+        
+        #write frames to video
+        for frame in frames:
+            #convert PIL image to OpenCV format
+            frame_cv = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+            out.write(frame_cv)
+            
+        out.release()
+        print(f"Video saved at: {video_path}")
+
+if __name__ == "__main__":
+    #GPU availability
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    wandb.login(key="KEY")
+    
+    #run ID from wandb
+    run_id = "5fcx7aqi"
+    model_path = f"models/{run_id}/best_model.zip"
+    
+    #eval model
+    evaluate_model(
+        model_path=model_path,
+        num_episodes=100,  
+        render=True  
+    )

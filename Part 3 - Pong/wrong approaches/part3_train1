@@ -1,0 +1,245 @@
+#import packages
+import supersuit as ss
+from pettingzoo.atari import pong_v3
+import numpy as np
+from stable_baselines3 import DQN
+import gymnasium
+import wandb
+from wandb.integration.sb3 import WandbCallback
+import torch
+import os
+import matplotlib.pyplot as plt
+from stable_baselines3.common.callbacks import BaseCallback
+import pandas as pd
+
+
+#track metrics
+class MetricsCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        #init params
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.rolling_rewards = []
+        self.rolling_window = 100
+        self.best_mean_reward = -np.inf  
+        
+    def _on_step(self) -> bool:
+        #log episode rewards 
+        current_reward = self.locals['rewards'][0]
+        wandb.log({
+            "step_reward": current_reward,
+            "step": self.num_timesteps
+        })
+        if self.locals.get('dones'):
+            reward = self.locals['rewards'][0]
+            self.episode_rewards.append(reward)
+            
+            #log metrics 
+            metrics_dict = {
+                "episode_reward": reward,
+                "episode_length": self.locals.get('n_steps', 0),
+                "exploration_rate": self.model.exploration_rate,
+                "learning_rate": self.locals['infos'][0].get('learning_rate', 0),
+                "buffer_size": self.model.replay_buffer.size() if hasattr(self.model.replay_buffer, 'size') else 0,
+            }
+
+            print(f"\nEpisode {len(self.episode_rewards)} completed:")
+            print(f"Episode Reward: {reward}")
+            
+            #rolling reward 
+            if len(self.episode_rewards) >= self.rolling_window:
+                rolling_reward = np.mean(self.episode_rewards[-self.rolling_window:])
+                self.rolling_rewards.append(rolling_reward)
+                metrics_dict["rolling_reward"] = rolling_reward
+                print(f"Rolling Average Reward (last {self.rolling_window} episodes): {rolling_reward:.2f}\n")
+                
+                #save best model 
+                if rolling_reward > self.best_mean_reward:
+                    self.best_mean_reward = rolling_reward
+                    self.model.save(f"models/{wandb.run.id}/best_model")
+                    print(f"New best model saved with mean reward: {rolling_reward:.2f}")
+                    metrics_dict["best_mean_reward"] = rolling_reward
+                
+            #log to wandb
+            wandb.log(metrics_dict)
+
+        return True
+
+    def save_metrics(self, save_path):
+        #plots directory 
+        plots_dir = os.path.join(save_path, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+
+        #plot rewards
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.episode_rewards)
+        plt.title('Episode Rewards')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.savefig(os.path.join(plots_dir, 'episode_rewards.png'))
+        plt.close()
+
+        #plot rolling rewards
+        if self.rolling_rewards:
+            plt.figure(figsize=(10, 5))
+            plt.plot(self.rolling_rewards)
+            plt.title(f'Rolling Mean Reward (window={self.rolling_window})')
+            plt.xlabel('Episode')
+            plt.ylabel('Rolling Mean Reward')
+            plt.savefig(os.path.join(plots_dir, 'rolling_rewards.png'))
+            plt.close()
+
+        #save metrics (different formats))
+        metrics_dir = os.path.join(save_path, 'metrics')
+        os.makedirs(metrics_dir, exist_ok=True)
+        np.save(os.path.join(metrics_dir, 'episode_rewards.npy'), np.array(self.episode_rewards))
+        np.save(os.path.join(metrics_dir, 'rolling_rewards.npy'), np.array(self.rolling_rewards))
+
+        df = pd.DataFrame({
+            'episode': range(len(self.episode_rewards)),
+            'reward': self.episode_rewards,
+        })
+        if self.rolling_rewards:
+            df['rolling_reward'] = pd.Series(self.rolling_rewards, index=range(self.rolling_window-1, len(self.episode_rewards)))
+        df.to_csv(os.path.join(metrics_dir, 'metrics.csv'), index=False)
+
+def make_env():
+    #create env
+    env = pong_v3.parallel_env(render_mode=None)
+    
+    #preprocessing
+    env = ss.color_reduction_v0(env, mode="B")
+    env = ss.resize_v1(env, x_size=84, y_size=84) #specifying size(84 x 84)
+    env = ss.frame_stack_v1(env, 4) #stacking frames (4)
+    env = ss.dtype_v0(env, dtype=np.float32)
+    env = ss.normalize_obs_v0(env, env_min=0, env_max=1)
+    
+    #as we had multiple errors with Gymnasium, we had to create a custom wrapper as the already existing ones were not working
+    #custom wrapper --> Gymnasium compatible
+    class GymCompatWrapper(gymnasium.Env):
+        def __init__(self, env):
+            self.env = env
+            self.agents = env.possible_agents
+            #specify obs space (4, 84, 84)
+            self.observation_space = gymnasium.spaces.Box(
+                low=0, high=1,
+                shape=(4, 84, 84),
+                dtype=np.float32
+            )
+            self.action_space = env.action_space(self.agents[0])
+
+        #reset   
+        def reset(self, **kwargs):
+            obs, _ = self.env.reset(**kwargs)
+            obs_first = obs[self.agents[0]]
+            obs_first = np.transpose(obs_first, (2, 0, 1))
+            return obs_first, {}
+            
+        def step(self, action):
+            actions = {agent: action for agent in self.env.agents}
+            obs, rewards, terminations, truncations, infos = self.env.step(actions)
+            
+            obs_first = obs[self.agents[0]]
+            reward_first = rewards[self.agents[0]]
+            terminated = terminations[self.agents[0]]
+            truncated = truncations[self.agents[0]]
+            
+            obs_first = np.transpose(obs_first, (2, 0, 1))
+            
+            return obs_first, reward_first, terminated, truncated, infos
+            
+        def render(self):
+            return self.env.render()
+            
+        def close(self):
+            return self.env.close()
+    
+    env = GymCompatWrapper(env)
+    return env
+
+if __name__ == "__main__":
+    #directories
+    os.makedirs("models", exist_ok=True)
+    
+    #GPU availability
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    #config params
+    config = {
+        "algorithm": "DQN",
+        "total_timesteps": 1000000,
+        "learning_rate": 0.0001,
+        "buffer_size": 25000,  
+        "learning_starts": 2000,
+        "batch_size": 64,
+        "train_freq": 4,
+        "gradient_steps": 4,
+        "target_update_interval": 1000,
+        "exploration_fraction": 0.1,
+        "exploration_final_eps": 0.01,
+        "device": str(device)
+    }
+    
+    #init wandb
+    wandb.login(key="KEY")
+    
+    #config wandb
+    run = wandb.init(
+        project="pong-dqn",
+        name="pong_training_gpu",
+        config=config
+    )
+    
+    env = make_env()
+    
+    #DQN model
+    model = DQN(
+        policy="CnnPolicy",
+        env=env,
+        learning_rate=config["learning_rate"],
+        buffer_size=config["buffer_size"],
+        learning_starts=config["learning_starts"],
+        batch_size=config["batch_size"],
+        train_freq=config["train_freq"],
+        gradient_steps=config["gradient_steps"],
+        target_update_interval=config["target_update_interval"],
+        exploration_fraction=config["exploration_fraction"],
+        exploration_final_eps=config["exploration_final_eps"],
+        tensorboard_log=None,
+        policy_kwargs={"normalize_images": False},  
+        device=device,
+        verbose=1
+    )
+
+    #directories with run ID
+    os.makedirs(f"models/{run.id}", exist_ok=True)
+    
+    #callbacks
+    metrics_callback = MetricsCallback()
+    wandb_callback = WandbCallback(
+        gradient_save_freq=100,
+        model_save_path=f"models/{run.id}",
+        verbose=2,
+    )
+
+    try:
+        #train
+        model.learn(
+            total_timesteps=config["total_timesteps"],
+            progress_bar=False,
+            callback=[metrics_callback, wandb_callback]
+        )
+    except Exception as e:
+        print(f"Error during training: {e}")
+        env.close()
+    finally:
+        #save final model and metrics
+        try:
+            model.save(f"models/{run.id}/final_model")  
+            metrics_callback.save_metrics(f"models/{run.id}")
+        except Exception as e:
+            print(f"Error saving model or metrics: {e}")
+        
+        wandb.finish()
