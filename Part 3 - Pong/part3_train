@@ -1,0 +1,325 @@
+#import packages
+import supersuit as ss
+from pettingzoo.atari import pong_v3
+import numpy as np
+from stable_baselines3 import DQN
+import gymnasium
+import wandb
+from wandb.integration.sb3 import WandbCallback
+import torch
+import os
+import matplotlib.pyplot as plt
+from stable_baselines3.common.callbacks import BaseCallback
+import pandas as pd
+
+
+#track metrics
+class MetricsCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        #track rewards separately for each side
+        self.episode_rewards_side0 = []
+        self.episode_rewards_side1 = []
+        self.rolling_rewards_side0 = []
+        self.rolling_rewards_side1 = []
+        self.rolling_window = 100
+        self.best_mean_reward = -np.inf
+        self.min_episodes_before_save = 200
+        
+    def _on_step(self) -> bool:
+        current_reward = self.locals['rewards'][0]
+        #access current_side through the base environment
+        base_env = self.training_env.envs[0].unwrapped
+        current_side = base_env._current_side  #access the external tracker
+        
+        if self.locals.get('dones'):
+            reward = self.locals['rewards'][0]
+            
+            #reward for the appropriate side
+            if current_side == 0:
+                self.episode_rewards_side0.append(reward)
+            else:
+                self.episode_rewards_side1.append(reward)
+            
+            metrics_dict = {
+                f"episode_reward_side{current_side}": reward,
+                "episode_length": self.locals.get('n_steps', 0),
+                "current_side": current_side
+            }
+
+            #rolling rewards for both sides if we have enough episodes
+            if (len(self.episode_rewards_side0) >= self.rolling_window//2 and 
+                len(self.episode_rewards_side1) >= self.rolling_window//2):
+                
+                rolling_reward_0 = np.mean(self.episode_rewards_side0[-self.rolling_window//2:])
+                rolling_reward_1 = np.mean(self.episode_rewards_side1[-self.rolling_window//2:])
+                
+                self.rolling_rewards_side0.append(rolling_reward_0)
+                self.rolling_rewards_side1.append(rolling_reward_1)
+                
+                metrics_dict.update({
+                    "rolling_reward_side0": rolling_reward_0,
+                    "rolling_reward_side1": rolling_reward_1,
+                    "rolling_reward_mean": (rolling_reward_0 + rolling_reward_1) / 2
+                })
+                
+                #save model only if both sides are performing well
+                combined_rolling_reward = min(rolling_reward_0, rolling_reward_1)  #minimum of both sides
+                
+                if (len(self.episode_rewards_side0) >= self.min_episodes_before_save//2 and 
+                    len(self.episode_rewards_side1) >= self.min_episodes_before_save//2):
+                    
+                    if combined_rolling_reward > self.best_mean_reward:
+                        self.best_mean_reward = combined_rolling_reward
+                        self.model.save(f"models/{wandb.run.id}/best_model")
+                        print(f"\nNew best model saved:")
+                        print(f"Side 0 rolling reward: {rolling_reward_0:.2f}")
+                        print(f"Side 1 rolling reward: {rolling_reward_1:.2f}")
+                        print(f"Combined rolling reward: {combined_rolling_reward:.2f}")
+                        metrics_dict["best_mean_reward"] = combined_rolling_reward
+
+            print(f"\nEpisode completed (Side {current_side}):")
+            print(f"Episode Reward: {reward:.2f}")
+            if len(self.rolling_rewards_side0) > 0:
+                print(f"Rolling Average Reward Side 0: {self.rolling_rewards_side0[-1]:.2f}")
+                print(f"Rolling Average Reward Side 1: {self.rolling_rewards_side1[-1]:.2f}")
+            print("-" * 50)
+
+            wandb.log(metrics_dict)
+
+        return True
+
+    def save_metrics(self, save_path):
+        #plots directory 
+        plots_dir = os.path.join(save_path, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+
+        #plot rewards
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.episode_rewards_side0)
+        plt.title('Episode Rewards Side 0')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.savefig(os.path.join(plots_dir, 'episode_rewards_side0.png'))
+        plt.close()
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.episode_rewards_side1)
+        plt.title('Episode Rewards Side 1')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.savefig(os.path.join(plots_dir, 'episode_rewards_side1.png'))
+        plt.close()
+
+        #plot rolling rewards
+        if self.rolling_rewards_side0:
+            plt.figure(figsize=(10, 5))
+            plt.plot(self.rolling_rewards_side0)
+            plt.title(f'Rolling Mean Reward Side 0 (window={self.rolling_window})')
+            plt.xlabel('Episode')
+            plt.ylabel('Rolling Mean Reward')
+            plt.savefig(os.path.join(plots_dir, 'rolling_rewards_side0.png'))
+            plt.close()
+
+        if self.rolling_rewards_side1:
+            plt.figure(figsize=(10, 5))
+            plt.plot(self.rolling_rewards_side1)
+            plt.title(f'Rolling Mean Reward Side 1 (window={self.rolling_window})')
+            plt.xlabel('Episode')
+            plt.ylabel('Rolling Mean Reward')
+            plt.savefig(os.path.join(plots_dir, 'rolling_rewards_side1.png'))
+            plt.close()
+
+        #save metrics (different formats))
+        metrics_dir = os.path.join(save_path, 'metrics')
+        os.makedirs(metrics_dir, exist_ok=True)
+        np.save(os.path.join(metrics_dir, 'episode_rewards_side0.npy'), np.array(self.episode_rewards_side0))
+        np.save(os.path.join(metrics_dir, 'episode_rewards_side1.npy'), np.array(self.episode_rewards_side1))
+        np.save(os.path.join(metrics_dir, 'rolling_rewards_side0.npy'), np.array(self.rolling_rewards_side0))
+        np.save(os.path.join(metrics_dir, 'rolling_rewards_side1.npy'), np.array(self.rolling_rewards_side1))
+
+        df = pd.DataFrame({
+            'episode': range(len(self.episode_rewards_side0)),
+            'reward': self.episode_rewards_side0,
+        })
+        if self.rolling_rewards_side0:
+            df['rolling_reward'] = pd.Series(self.rolling_rewards_side0, index=range(self.rolling_window-1, len(self.episode_rewards_side0)))
+        df.to_csv(os.path.join(metrics_dir, 'metrics_side0.csv'), index=False)
+
+        df = pd.DataFrame({
+            'episode': range(len(self.episode_rewards_side1)),
+            'reward': self.episode_rewards_side1,
+        })
+        if self.rolling_rewards_side1:
+            df['rolling_reward'] = pd.Series(self.rolling_rewards_side1, index=range(self.rolling_window-1, len(self.episode_rewards_side1)))
+        df.to_csv(os.path.join(metrics_dir, 'metrics_side1.csv'), index=False)
+
+def make_env():
+    #create env
+    env = pong_v3.parallel_env(render_mode=None)
+    
+    #preprocessing
+    env = ss.color_reduction_v0(env, mode="B")
+    env = ss.resize_v1(env, x_size=84, y_size=84) #specifying size(84 x 84)
+    env = ss.frame_stack_v1(env, 4) #stacking frames (4)
+    env = ss.dtype_v0(env, dtype=np.float32)
+    env = ss.normalize_obs_v0(env, env_min=0, env_max=1)
+    
+    #as we had multiple errors with Gymnasium, we had to create a custom wrapper as the already existing ones were not working
+    #custom wrapper --> Gymnasium compatible
+    class GymCompatWrapper(gymnasium.Env):
+        def __init__(self, env):
+            self.env = env
+            self.agents = env.possible_agents
+            #specify obs space (4, 84, 84)
+            self.observation_space = gymnasium.spaces.Box(
+                low=0, high=1,
+                shape=(4, 84, 84),
+                dtype=np.float32
+            )
+            self.action_space = env.action_space(self.agents[0])
+            self.current_side = 0  # Track which side we're playing from
+            self._current_side = 0  # Additional attribute for external access
+
+        #reset   
+        def reset(self, **kwargs):
+            obs, _ = self.env.reset(**kwargs)
+            #choose which side to play from
+            self.current_side = np.random.randint(0, 2)
+            self._current_side = self.current_side  #external tracker
+            obs_agent = obs[self.agents[self.current_side]]
+            
+            #flip observation if playing from second side
+            if self.current_side == 1:
+                obs_agent = np.flip(obs_agent, axis=1)
+                
+            obs_agent = np.transpose(obs_agent, (2, 0, 1))
+            return obs_agent, {}
+            
+        def step(self, action):
+            #second side, flip the action
+            if self.current_side == 1:
+                #0=STAY, 1=UP, 2=DOWN
+                if action == 1:
+                    action = 2
+                elif action == 2:
+                    action = 1
+                    
+            actions = {
+                self.agents[0]: action if self.current_side == 0 else self.action_space.sample(),
+                self.agents[1]: action if self.current_side == 1 else self.action_space.sample()
+            }
+            
+            obs, rewards, terminations, truncations, infos = self.env.step(actions)
+            
+            obs_agent = obs[self.agents[self.current_side]]
+            reward_agent = rewards[self.agents[self.current_side]]
+            terminated = terminations[self.agents[self.current_side]]
+            truncated = truncations[self.agents[self.current_side]]
+            
+            #flip observation if playing from second side
+            if self.current_side == 1:
+                obs_agent = np.flip(obs_agent, axis=1)
+                reward_agent = -reward_agent  #invert reward for second side
+                
+            obs_agent = np.transpose(obs_agent, (2, 0, 1))
+            
+            return obs_agent, reward_agent, terminated, truncated, infos
+            
+        def render(self):
+            return self.env.render()
+            
+        def close(self):
+            return self.env.close()
+            
+        def get_current_side(self):
+            return self._current_side
+    
+    env = GymCompatWrapper(env)
+    return env
+
+if __name__ == "__main__":
+    #directories
+    os.makedirs("models", exist_ok=True)
+    
+    #GPU availability
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    #config params
+    config = {
+        "algorithm": "DQN",
+        "total_timesteps": 2000000,
+        "learning_rate": 0.0001,
+        "buffer_size": 25000,  
+        "learning_starts": 2000,
+        "batch_size": 64,
+        "train_freq": 4,
+        "gradient_steps": 4,
+        "target_update_interval": 1000,
+        "exploration_fraction": 0.1,
+        "exploration_final_eps": 0.01,
+        "device": str(device)
+    }
+    
+    #init wandb
+    wandb.login(key="067eada2bb47e4ae47f13cdb62ae8ab49d182618")
+    
+    #config wandb
+    run = wandb.init(
+        project="pong-dqn",
+        name="pong_training_both_sides",
+        config=config
+    )
+    
+    env = make_env()
+    
+    #DQN model
+    model = DQN(
+        policy="CnnPolicy",
+        env=env,
+        learning_rate=config["learning_rate"],
+        buffer_size=config["buffer_size"],
+        learning_starts=config["learning_starts"],
+        batch_size=config["batch_size"],
+        train_freq=config["train_freq"],
+        gradient_steps=config["gradient_steps"],
+        target_update_interval=config["target_update_interval"],
+        exploration_fraction=config["exploration_fraction"],
+        exploration_final_eps=config["exploration_final_eps"],
+        tensorboard_log=None,
+        policy_kwargs={"normalize_images": False},  
+        device=device,
+        verbose=1
+    )
+
+    #directories with run ID
+    os.makedirs(f"models/{run.id}", exist_ok=True)
+    
+    #callbacks
+    metrics_callback = MetricsCallback()
+    wandb_callback = WandbCallback(
+        gradient_save_freq=100,
+        model_save_path=f"models/{run.id}",
+        verbose=2,
+    )
+
+    try:
+        #train
+        model.learn(
+            total_timesteps=config["total_timesteps"],
+            progress_bar=False,
+            callback=[metrics_callback, wandb_callback]
+        )
+    except Exception as e:
+        print(f"Error during training: {e}")
+        env.close()
+    finally:
+        #save final model and metrics
+        try:
+            model.save(f"models/{run.id}/final_model")  
+            metrics_callback.save_metrics(f"models/{run.id}")
+        except Exception as e:
+            print(f"Error saving model or metrics: {e}")
+        
+        wandb.finish()
